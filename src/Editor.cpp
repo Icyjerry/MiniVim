@@ -59,19 +59,34 @@ void Editor::Execute(const EditorAction& action) {
         return;
     case ActionKind::Move:
         //交给Window吧
+	if (action.motion_){
+	    window_.ApplyMotion(buffer_, *action.motion_);
+	}
         return;
-    case ActionKind::InsertBefore:
+    case ActionKind::InsertBefore:{
         //进入InsertMode,Editor自己就有对应方法
-        return;
+        Position position = window_.GetCursor();
+	EnterInsert(position);
+	return;
+	}
     case ActionKind::InsertAfter: {
         //从当前Char之后进入InsertMode
         //特判:如果Buffer表示当前Cursor所在的行是空的怎么办?
-        return;
+        Position position = window_.GetCursor();
+	const auto& line = buffer_.GetLineAt(position.row_);
+        if (!line.empty()) {
+	   ++position.column_;
+	}
+	EnterInsert(position);		  
+	return;
     }
     case ActionKind::EnterCommandLine:
         //进入Command Mode
         //记得清空当前的message之类的遗留状态
-        return;
+    mode_ = Mode::CommandLine;
+    command_.clear();
+    message_.clear();    		  
+    return;
     }
 }
 
@@ -87,12 +102,21 @@ void Editor::HandleInsert(KeyEvent key) {
 }
 void Editor::EnterInsert(Position position) {
     //切换到Insert模式,设置插入位置并清除旧提示;允许光标停在行尾字符之后
-    throw std::runtime_error("Not implemented.");
+    mode_ = Mode::Insert;
+    window_.SetCursor(buffer_, position, true);
+    message_.clear();
 }
 
 void Editor::LeaveInsert() {
     //从插入位置回到Normal模式的字符位置:不在行首时先左移一列,再限制光标范围
-    throw std::runtime_error("Not implemented.");
+    
+    Position position = window_.GetCursor();
+    if (position.column < 0){
+	--position.column_;
+    }
+
+    mode_ = Mode::Normal;
+    window_SetCursor(buffer_, position, false);
 }
 
 
