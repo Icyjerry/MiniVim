@@ -14,7 +14,19 @@ namespace {
 std::string Trim(std::string value) {
     //去掉字符串两端的空白,保留中间的内容;全部是空白时返回空字符串
     //你可以分别从两端找到第一个非空白字符,注意反向迭代器转回正向迭代器时的边界
-    throw std::runtime_error("Not implemented.");
+    std::size_t first = 0;
+    while (first < value.size() &&
+           std::isspace(static_cast<unsigned char>(value[first]))) {
+        ++first;
+    }
+
+    std::size_t last = value.size();
+    while (last > first &&
+           std::isspace(static_cast<unsigned char>(value[last - 1]))) {
+        --last;
+    }
+    return value.substr(first, last - first);
+
 }
 
 //判断是否为ASCII可打印字符,Tab由插入模式另外处理
@@ -35,22 +47,48 @@ void Editor::Run() {
 }
 
 //返回编辑器是否还需要继续运行
-bool Editor::IsRunning() const noexcept { return false; }
+bool Editor::IsRunning() const noexcept { return running_; }
 
 void Editor::RefreshScreen() {
     //1. 获取终端大小(GetScreenSize),更新窗口可显示的范围,并让光标落在可见区域内
     //2. 把当前模式、命令和提示打包成RenderState
     //3. 让Renderer生成一帧字符串,再交给Terminal输出
     //这里是你唯一需要调用Terminal中的接口的地方,请调用WriteOutput
-    throw std::runtime_error("Not implemented.");
+    window_.Resize(terminal_.GetScreenSize());
+    window_.EnsureCursorVisible(buffer_);
+
+    RenderState state;
+    state.mode_ = mode_;
+    state.command_ = command_;
+    state.message_ = message_;
+
+    terminal_.WriteOutput(renderer_.Render(buffer_, window_, state));
 }
 
 void Editor::ProcessKey(KeyEvent key) {
     //1. (可选)先处理所有模式都能使用的Ctrl-Q,用于紧急退出
     //2. 按当前模式分发给命令行或插入模式的处理函数
     //3. Normal模式下清除旧提示,将按键交给parser,再执行生成的Action
-    throw std::runtime_error("Not implemented.");
+    if (key.IsControl('q')){
+	running_ = false;
+	return;
+    }
+
+    switch (mode_){
+    case Mode::Insert:
+	HandleInsert(key);
+        return;
+    case Mode::CommandLine:
+	HandleCommandLine(key);
+	return;
+    case Mode::Normal:
+	message_.clear();
+	Execute(normal_parser_.Feed(key));
+	return;
+    }
+
 }
+
 
 void Editor::Execute(const EditorAction& action) {
     //根据Action的种类调用对应模块
@@ -98,7 +136,46 @@ void Editor::HandleInsert(KeyEvent key) {
     //3. Backspace删除前一个字符;若在行首且不是第一行,则与上一行合并
     //4. 可打印字符和Tab插入当前位置,光标向后移动一列
     //修改内容后记得同步Window中的光标,插入模式允许光标位于line.size()
-    throw std::runtime_error("Not implemented.");
+    if (key.code_ == KeyCode::Escape) {
+        LeaveInsert();
+        return;
+    }
+
+    Position position = window_.GetCursor();
+
+    if (key.code_ == KeyCode::Enter) {
+        buffer_.SplitLine(position.row_, position.column_);
+        ++position.row_;
+        position.column_ = 0;
+        window_.SetCursor(buffer_, position, true);
+        return;
+    }
+
+    if (key.code_ == KeyCode::Backspace) {
+        if (position.column_ > 0) {
+            buffer_.EraseCharacter(position.row_, position.column_ - 1);
+            --position.column_;
+        } else if (position.row_ > 0) {
+            const std::size_t previous_row = position.row_ - 1;
+            const std::size_t previous_length =
+                buffer_.GetLineAt(previous_row).size();
+            buffer_.JoinLine(previous_row);
+            position.row_ = previous_row;
+            position.column_ = previous_length;
+        } else {
+            return;
+        }
+
+        window_.SetCursor(buffer_, position, true);
+        return;
+    }
+
+    if (key.code_ == KeyCode::Character &&
+        (key.value_ == '\t' || IsPrintable(key.value_))) {
+        buffer_.InsertCharacter(position.row_, position.column_, key.value_);
+        ++position.column_;
+        window_.SetCursor(buffer_, position, true);
+    }
 }
 void Editor::EnterInsert(Position position) {
     //切换到Insert模式,设置插入位置并清除旧提示;允许光标停在行尾字符之后
@@ -109,14 +186,14 @@ void Editor::EnterInsert(Position position) {
 
 void Editor::LeaveInsert() {
     //从插入位置回到Normal模式的字符位置:不在行首时先左移一列,再限制光标范围
-    
+
     Position position = window_.GetCursor();
-    if (position.column < 0){
+    if (position.column_ > 0){
 	--position.column_;
     }
 
     mode_ = Mode::Normal;
-    window_SetCursor(buffer_, position, false);
+    window_.SetCursor(buffer_, position, false);
 }
 
 
@@ -125,7 +202,24 @@ void Editor::HandleCommandLine(KeyEvent key) {
     //命令内容保存在command_中,不修改Buffer
     //Escape取消命令,Enter执行命令,Backspace/Delete删除末尾字符,可打印字符追加到末尾
     //注意空命令不能再删除字符
-    throw std::runtime_error("Not implemented.");
+    if (key.code_ == KeyCode::Escape){
+	LeaveCommandLine();
+	return;
+    }
+    if (key.code_ == KeyCode::Enter){
+	ExecuteCommandLine();
+	return;
+    }
+    if (key.code_ == KeyCode::Backspace || key.code_ == KeyCode::Delete) {
+	if (!command_.empty()){
+	    command_.pop_back();
+	}
+	return;
+    }
+    if (key.code_ == KeyCode::Character && IsPrintable(key.value_)){
+	command_.push_back(key.value_);
+    }
+
 }
 
 void Editor::ExecuteCommandLine() {
@@ -133,20 +227,58 @@ void Editor::ExecuteCommandLine() {
     //2. 空命令直接返回,否则按第一个空格或Tab拆成命令名和参数
     //3. 在Basic部分中你会发现最后命令就一个命令名,直接根据要求的命令名执行
     //4. 无法识别的命令写入message_,供下一次刷新显示
-    throw std::runtime_error("Not implemented.");
+
+    const std::string input = Trim(command_);
+    LeaveCommandLine();
+
+    if (input.empty()){
+	return;
+    }
+    const std::size_t separator = input.find_first_of(" \t");
+    const std::string name = input.substr(0, separator);
+    const std::string argument = separator == std::string::npos ? "" : Trim(input.substr(separator + 1));
+    if (name == "q!") {
+        running_ = false;
+	return;
+    }
+    if (name == "wq"){
+	const bool saved = argument.empty() ? SaveBuffer() : SaveBuffer(std::filesystem::path(argument));
+        if (saved) {
+            running_ = false;
+        }
+        return;
+    }
+    message_ = "Unknown command: " + name;
 }
 
 void Editor::LeaveCommandLine() {
     //恢复Normal模式并清空正在输入的命令
-    throw std::runtime_error("Not implemented.");
+    mode_ = Mode::Normal;
+    command_.clear();
 }
+
 
 
 bool Editor::SaveBuffer(const std::filesystem::path& path) {
     //1. path为空时调用Save,否则调用SaveAs
     //2. 捕获保存时的异常,把错误写入message_并返回false
     //3. 成功后生成包含文件名和行数的提示,返回true,供wq判断是否可以退出
-    throw std::runtime_error("Not implemented.");
+    try {
+        if (path.empty()) {
+            buffer_.Save();
+        } else {
+            buffer_.SaveAs(path);
+        }
+
+        message_ = "\"" + buffer_.GetDisplayName() + "\" " +
+                   std::to_string(buffer_.GetLineCount()) +
+                   " lines written";
+        return true;
+    } catch (const std::exception& error) {
+        message_ = error.what();
+        return false;
+    }
+
 }
 
 } // namespace sjtu
